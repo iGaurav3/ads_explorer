@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ads Explorer Capture</title>
+  <style>
+    :root { --bg: #f6f7f9; --fg: #1d2330; --muted: #5d6677; --card: #fff; --line: #dde1e8; --ok: #17803d; --bad: #b42318; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #11141a; --fg: #e6e9ef; --muted: #9aa3b2; --card: #1a1f28; --line: #2c3340; --ok: #4ade80; --bad: #f87171; }
+    }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+    main { max-width: 560px; margin: 40px auto; padding: 0 16px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    p { margin: 8px 0; }
+    .muted { color: var(--muted); }
+    .ok { color: var(--ok); }
+    .bad { color: var(--bad); }
+    a { color: inherit; }
+  </style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>Ads Explorer: capture</h1>
+    <p id="msg" class="muted">Waiting for the page from the ad library… Click the “Send to Ads Explorer” bookmark on an
+      ad-library results page to use this.</p>
+    <p id="detail" class="muted"></p>
+    <p><a href="/">Open Ads Explorer</a></p>
+  </div>
+</main>
+<script>
+  // Only ad-library pages may send captures here; the server re-checks the page URL.
+  const ALLOWED = new Set(['https://www.facebook.com', 'https://web.facebook.com', 'https://facebook.com',
+    'https://www.linkedin.com', 'https://linkedin.com', 'https://adstransparency.google.com'])
+  const RUN_KEY = 'ads-explorer-run'
+  const msg = document.getElementById('msg')
+  const detail = document.getElementById('detail')
+  let done = false
+
+  function readRun() {
+    try { return JSON.parse(localStorage.getItem(RUN_KEY) || 'null') } catch { return null }
+  }
+  function saveRun(run) {
+    try { localStorage.setItem(RUN_KEY, JSON.stringify(run)) } catch { /* storage unavailable */ }
+  }
+  function show(text, tone) { msg.textContent = text; msg.className = tone || 'muted' }
+
+  window.addEventListener('message', async event => {
+    if (done || !ALLOWED.has(event.origin) || !event.data || event.data.type !== 'ads-capture') return
+    done = true
+    const run = readRun()
+    show('Reading ads from the page… (the local LLM can take a minute)')
+    try {
+      const res = await fetch('/api/capture', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          page_url: String(event.data.page_url || ''), text: String(event.data.text || ''),
+          fetch_id: run && run.fetchId, company: run && run.company,
+        }),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(Array.isArray(body.detail) ? body.detail.map(d => d.msg).join('; ') : body.detail || 'HTTP ' + res.status)
+      const next = run && run.fetchId === body.fetch_id ? run : { fetchId: body.fetch_id, company: run && run.company, platforms: [] }
+      if (!next.platforms.includes(body.platform)) next.platforms = [...next.platforms, body.platform]
+      saveRun(next)
+      try { new BroadcastChannel('ads-capture').postMessage({ fetchId: body.fetch_id, platform: body.platform }) } catch { /* old browser */ }
+      show(body.captured ? `Added ${body.captured} ad(s) from ${body.platform}.` : 'No ads recognized on that page.', body.captured ? 'ok' : 'bad')
+      detail.textContent = [`Method: ${body.method}.`, `Total for ${body.platform} in this search: ${body.status.record_count}.`,
+        ...(body.warnings || [])].join(' ')
+    } catch (e) {
+      show('Capture failed: ' + e.message, 'bad')
+    }
+  })
+  if (window.opener) window.opener.postMessage('ads-capture-ready', '*')
+</script>
+</body>
+</html>
